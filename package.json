@@ -1,0 +1,20 @@
+{
+  "name": "kbo-matchup-crawler",
+  "version": "1.0.0",
+  "private": true,
+  "description": "KBO 투수 vs 타자 맞대결 전적 크롤링",
+  "scripts": {
+    "crawl": "tsx scripts/crawl-matchup.ts --full",
+    "crawl:team": "tsx scripts/crawl-matchup.ts --full --pitcher-team",
+    "crawl:sample": "tsx scripts/crawl-matchup.ts --sample",
+    "merge": "tsx scripts/crawl-matchup.ts --merge",
+    "upload": "tsx scripts/upload-d1.ts"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

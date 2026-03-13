@@ -1,0 +1,142 @@
+name: KBO Matchup Crawl
+
+on:
+  schedule:
+    # 매일 UTC 15:00 (KST 00:00)
+    - cron: '0 15 * * *'
+  workflow_dispatch:
+    inputs:
+      delay:
+        description: '요청 간격 (ms)'
+        default: '2000'
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        team: [LG, HH, SK, SS, NC, KT, LT, HT, OB, WO]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore crawl cache
+        uses: actions/cache/restore@v4
+        with:
+          path: scripts/matchup-cache-${{ matrix.team }}.json
+          key: matchup-${{ matrix.team }}-${{ github.run_number }}
+          restore-keys: |
+            matchup-${{ matrix.team }}-
+
+      - name: Show cache status
+        run: |
+          FILE="scripts/matchup-cache-${{ matrix.team }}.json"
+          if [ -f "$FILE" ]; then
+            COMPLETED=$(node -e "const c=require('./${FILE}'); console.log(c.completed.length)")
+            echo "[${{ matrix.team }}] 캐시: ${COMPLETED}건 완료"
+          else
+            echo "[${{ matrix.team }}] 캐시 없음"
+          fi
+
+      - name: Run crawl (${{ matrix.team }})
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          DELAY="${{ github.event.inputs.delay || '2000' }}"
+          npx tsx scripts/crawl-matchup.ts --full --pitcher-team "${{ matrix.team }}" --delay "$DELAY" --limit "15000"
+
+      - name: Save crawl cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: scripts/matchup-cache-${{ matrix.team }}.json
+          key: matchup-${{ matrix.team }}-${{ github.run_number }}
+
+      - name: Upload team result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: matchup-${{ matrix.team }}
+          path: scripts/matchup-cache-${{ matrix.team }}.json
+          retention-days: 30
+
+  merge-and-upload:
+    needs: crawl
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download all team results
+        uses: actions/download-artifact@v4
+        with:
+          path: scripts/team-results
+          pattern: matchup-*
+
+      - name: Move team caches
+        run: |
+          for dir in scripts/team-results/matchup-*/; do
+            cp "$dir"*.json scripts/ 2>/dev/null || true
+          done
+          ls -la scripts/matchup-cache-*.json 2>/dev/null || echo "No team caches"
+
+      - name: Merge results
+        run: npx tsx scripts/crawl-matchup.ts --merge
+
+      - name: Copy merged to data/
+        run: |
+          cp scripts/matchup-results.json data/matchup-merged.json
+
+      - name: Upload to D1
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID }}
+        run: npx tsx scripts/upload-d1.ts
+
+      - name: Upload merged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: matchup-merged
+          path: data/matchup-merged.json
+          retention-days: 90
+
+      - name: Summary
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          DONE=$(node -e "const c=require('./scripts/matchup-cache.json'); console.log(c.completed.length)")
+          DATA=$(node -e "const c=require('./scripts/matchup-cache.json'); console.log(c.results.filter(r=>r.stats).length)")
+          echo "Total: ${DONE}, with data: ${DATA}"
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d parse_mode="HTML" \
+              -d text="📊 <b>맞대결 크롤링+D1 업로드 완료</b>%0A총: ${DONE}건 (데이터: ${DATA}건)" || true
+          fi

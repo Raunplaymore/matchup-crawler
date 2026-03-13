@@ -1,0 +1,9 @@
+node_modules/
+dist/
+
+# Crawl caches (team-specific, large files)
+scripts/matchup-cache-*.json
+scripts/matchup-results-*.json
+scripts/matchup-cache.json
+scripts/matchup-results.json
+scripts/matchup-sample.json
