@@ -14,9 +14,14 @@ on:
         default: '3000'
 
 jobs:
-  crawl-daily:
+  # ── Stage 1: 크롤링 + Staging upsert ──
+  crawl-and-stage:
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    outputs:
+      found: ${{ steps.find-result.outputs.found }}
+      file: ${{ steps.find-result.outputs.file }}
+      records: ${{ steps.find-result.outputs.records }}
 
     steps:
       - name: Checkout
@@ -55,12 +60,12 @@ jobs:
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload to D1 (UPSERT)
+      - name: Upload to Staging D1 (UPSERT)
         if: steps.find-result.outputs.found == 'true' && steps.find-result.outputs.records != '0'
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID_STAGING }}
         run: npx tsx scripts/upload-d1.ts --upsert --file "${{ steps.find-result.outputs.file }}"
 
       - name: Upload daily artifact
@@ -71,18 +76,119 @@ jobs:
           path: scripts/daily-*.json
           retention-days: 30
 
-      - name: Notify
+      - name: Notify staging
+        if: steps.find-result.outputs.found == 'true' && steps.find-result.outputs.records != '0'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RECORDS="${{ steps.find-result.outputs.records }}"
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d parse_mode="HTML" \
+              -d text="📦 <b>[Staging] 일일 맞대결 upsert 완료</b> (${RECORDS}건) — 검증 중" || true
+          fi
+
+  # ── Stage 2: Staging 검증 ──
+  validate-staging:
+    needs: crawl-and-stage
+    if: needs.crawl-and-stage.outputs.found == 'true' && needs.crawl-and-stage.outputs.records != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      passed: ${{ steps.validate.outputs.passed }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate staging data
+        id: validate
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID_STAGING }}
+        run: |
+          RESULT=$(npx tsx scripts/upload-d1.ts --validate)
+          PASSED=$(echo "$RESULT" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log(d.passed)")
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+
+      - name: Notify validation result
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          PASSED="${{ steps.validate.outputs.passed }}"
+          if [ "$PASSED" = "true" ]; then
+            EMOJI="✅"; MSG="검증 통과 → Production 반영 중"
+          else
+            EMOJI="❌"; MSG="검증 실패 — Production 반영 중단"
+          fi
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d parse_mode="HTML" \
+              -d text="${EMOJI} <b>[Staging] 일일 맞대결 ${MSG}</b>" || true
+          fi
+
+  # ── Stage 3: Production upsert (자동 — upsert는 비파괴적) ──
+  upload-production:
+    needs: [crawl-and-stage, validate-staging]
+    if: needs.validate-staging.outputs.passed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download daily artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: daily-matchup-${{ github.event.inputs.date || 'today' }}
+          path: scripts/
+
+      - name: Upload to Production D1 (UPSERT)
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID }}
+        run: |
+          FILE=$(ls -1 scripts/daily-*.json 2>/dev/null | head -1)
+          npx tsx scripts/upload-d1.ts --upsert --file "$FILE"
+
+      - name: Notify production complete
         if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           STATUS="${{ job.status }}"
-          EMOJI=$([[ "$STATUS" == "success" ]] && echo "✅" || echo "❌")
-          RECORDS="${{ steps.find-result.outputs.records || '0' }}"
+          EMOJI=$([[ "$STATUS" == "success" ]] && echo "🚀" || echo "❌")
+          RECORDS="${{ needs.crawl-and-stage.outputs.records }}"
           if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
             curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d chat_id="${TELEGRAM_CHAT_ID}" \
               -d parse_mode="HTML" \
-              -d text="${EMOJI} <b>일일 맞대결 업데이트 ${STATUS}</b> (D1: ${RECORDS}건)" || true
+              -d text="${EMOJI} <b>[Production] 일일 맞대결 ${STATUS}</b> (${RECORDS}건)" || true
           fi

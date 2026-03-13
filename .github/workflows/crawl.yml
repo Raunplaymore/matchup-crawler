@@ -70,11 +70,14 @@ jobs:
           path: scripts/matchup-cache-${{ matrix.team }}.json
           retention-days: 30
 
-  merge-and-upload:
+  # ── Stage 1: Staging D1에 업로드 ──
+  upload-staging:
     needs: crawl
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      record_count: ${{ steps.count.outputs.count }}
 
     steps:
       - name: Checkout
@@ -106,15 +109,24 @@ jobs:
         run: npx tsx scripts/crawl-matchup.ts --merge
 
       - name: Copy merged to data/
-        run: |
-          cp scripts/matchup-results.json data/matchup-merged.json
+        run: cp scripts/matchup-results.json data/matchup-merged.json
 
-      - name: Upload to D1
+      - name: Upload to Staging D1
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID_STAGING }}
         run: npx tsx scripts/upload-d1.ts
+
+      - name: Get staging record count
+        id: count
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID_STAGING }}
+        run: |
+          COUNT=$(npx tsx scripts/upload-d1.ts --count)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
       - name: Upload merged artifact
         uses: actions/upload-artifact@v4
@@ -123,17 +135,138 @@ jobs:
           path: data/matchup-merged.json
           retention-days: 90
 
-      - name: Summary
+      - name: Notify staging complete
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          DONE=$(node -e "const c=require('./scripts/matchup-cache.json'); console.log(c.completed.length)")
-          DATA=$(node -e "const c=require('./scripts/matchup-cache.json'); console.log(c.results.filter(r=>r.stats).length)")
-          echo "Total: ${DONE}, with data: ${DATA}"
+          COUNT="${{ steps.count.outputs.count }}"
           if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
             curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               -d chat_id="${TELEGRAM_CHAT_ID}" \
               -d parse_mode="HTML" \
-              -d text="📊 <b>맞대결 크롤링+D1 업로드 완료</b>%0A총: ${DONE}건 (데이터: ${DATA}건)" || true
+              -d text="📦 <b>[Staging] 맞대결 업로드 완료</b>%0A${COUNT}건 — 검증 진행 중" || true
+          fi
+
+  # ── Stage 2: Staging 데이터 검증 ──
+  validate-staging:
+    needs: upload-staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      passed: ${{ steps.validate.outputs.passed }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate staging data
+        id: validate
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID_STAGING }}
+        run: |
+          RESULT=$(npx tsx scripts/upload-d1.ts --validate)
+          PASSED=$(echo "$RESULT" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log(d.passed)")
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+
+      - name: Notify validation result
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          PASSED="${{ steps.validate.outputs.passed }}"
+          COUNT="${{ needs.upload-staging.outputs.record_count }}"
+          if [ "$PASSED" = "true" ]; then
+            EMOJI="✅"; MSG="검증 통과"
+          else
+            EMOJI="❌"; MSG="검증 실패"
+          fi
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d parse_mode="HTML" \
+              -d text="${EMOJI} <b>[Staging] ${MSG}</b> (${COUNT}건)%0A승인 대기 중: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" || true
+          fi
+
+  # ── Stage 3: Production 배포 (수동 승인 필요) ──
+  upload-production:
+    needs: validate-staging
+    if: needs.validate-staging.outputs.passed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Backup production data
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID }}
+        run: npx tsx scripts/upload-d1.ts --dump production-backup.json
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-backup
+          path: production-backup.json
+          retention-days: 90
+
+      - name: Download merged data
+        uses: actions/download-artifact@v4
+        with:
+          name: matchup-merged
+          path: data/
+
+      - name: Upload to Production D1
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID }}
+        run: npx tsx scripts/upload-d1.ts --file data/matchup-merged.json
+
+      - name: Verify production count
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_DATABASE_ID: ${{ secrets.CF_DATABASE_ID }}
+        run: |
+          COUNT=$(npx tsx scripts/upload-d1.ts --count)
+          echo "Production records: $COUNT"
+
+      - name: Notify production complete
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          COUNT=$(npx tsx scripts/upload-d1.ts --count 2>/dev/null || echo "?")
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d parse_mode="HTML" \
+              -d text="🚀 <b>[Production] 맞대결 배포 완료</b>%0A${COUNT}건 반영" || true
           fi
