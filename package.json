@@ -1,17 +1,25 @@
 {
-  "name": "kbo-matchup-crawler",
+  "name": "dugout-crawlers",
   "version": "1.0.0",
   "private": true,
-  "description": "KBO 투수 vs 타자 맞대결 전적 크롤링",
+  "description": "KBO 선수 데이터 크롤링 (맞대결, 선수정보, 수비, 등록, 나무위키)",
   "scripts": {
-    "crawl": "tsx scripts/crawl-matchup.ts --full",
-    "crawl:team": "tsx scripts/crawl-matchup.ts --full --pitcher-team",
-    "crawl:sample": "tsx scripts/crawl-matchup.ts --sample",
-    "merge": "tsx scripts/crawl-matchup.ts --merge",
-    "upload": "tsx scripts/upload-d1.ts"
+    "crawl:matchup": "tsx scripts/crawl-matchup.ts --full",
+    "crawl:matchup:team": "tsx scripts/crawl-matchup.ts --full --pitcher-team",
+    "crawl:matchup:sample": "tsx scripts/crawl-matchup.ts --sample",
+    "crawl:matchup:merge": "tsx scripts/crawl-matchup.ts --merge",
+    "crawl:players": "tsx scripts/crawl-players.ts",
+    "crawl:roster": "tsx scripts/crawl-roster.ts",
+    "crawl:defense": "tsx scripts/crawl-defense.ts",
+    "crawl:register": "tsx scripts/crawl-register.ts",
+    "sync": "tsx scripts/sync.ts",
+    "sync:register": "tsx scripts/sync-register.ts",
+    "resolve:namu": "tsx scripts/resolve-namuwiki.ts",
+    "upload:matchup": "tsx scripts/upload-d1.ts"
   },
   "dependencies": {
-    "cheerio": "^1.0.0"
+    "cheerio": "^1.0.0",
+    "dotenv": "^17.3.1"
   },
   "devDependencies": {
     "tsx": "^4.19.0",
