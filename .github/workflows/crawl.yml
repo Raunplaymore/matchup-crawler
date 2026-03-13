@@ -1,9 +1,6 @@
 name: KBO Matchup Crawl
 
 on:
-  schedule:
-    # 매일 UTC 15:00 (KST 00:00)
-    - cron: '0 15 * * *'
   workflow_dispatch:
     inputs:
       delay:
