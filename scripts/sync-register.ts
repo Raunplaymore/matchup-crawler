@@ -35,9 +35,9 @@ async function main() {
     return;
   }
 
-  console.log(`\n${API_URL}/api/sync-register 로 전송 중...`);
+  console.log(`\n${API_URL}/sync/register 로 전송 중...`);
 
-  const res = await fetch(`${API_URL}/api/sync-register`, {
+  const res = await fetch(`${API_URL}/sync/register`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

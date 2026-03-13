@@ -160,7 +160,7 @@ interface ProgressEntry {
 
 // === API 헬퍼 ===
 async function fetchPlayers(mode: string): Promise<Player[]> {
-  const res = await fetch(`${API_URL}/api/sync-namu?mode=${mode}`, {
+  const res = await fetch(`${API_URL}/sync/namu?mode=${mode}`, {
     headers: { "x-sync-secret": SYNC_SECRET! },
   });
   if (!res.ok) {
@@ -174,7 +174,7 @@ async function fetchPlayers(mode: string): Promise<Player[]> {
 async function syncNamuUrls(
   updates: { id: number; namuWikiUrl: string | null }[]
 ): Promise<{ updated: number; cleared: number }> {
-  const res = await fetch(`${API_URL}/api/sync-namu`, {
+  const res = await fetch(`${API_URL}/sync/namu`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

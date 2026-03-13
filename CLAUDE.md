@@ -21,7 +21,7 @@ scripts/
 
 - API 호출로만 통신: `SYNC_SECRET` 헤더 + `API_URL` 환경변수
 - 프로덕션 API: `https://api.lineup.prmtwiki.com`
-- 주요 엔드포인트: `/api/sync-players`, `/api/sync-register`, `/api/sync-namu`
+- 주요 엔드포인트: `/sync/players`, `/sync/register`, `/sync/namu`
 
 ## Commands
 

@@ -2,7 +2,7 @@
  * 선수 데이터 싱크 스크립트
  *
  * 1. KBO 공식 사이트에서 선수 크롤링
- * 2. 결과를 /api/sync-players로 POST
+ * 2. 결과를 /sync/players로 POST
  *
  * 사용법:
  *   npx tsx scripts/sync.ts                          # 로컬 dev 서버
@@ -56,7 +56,7 @@ async function main() {
   for (let i = SKIP; i < players.length; i += BATCH_SIZE) {
     const batch = players.slice(i, i + BATCH_SIZE);
     const isLast = i + BATCH_SIZE >= players.length;
-    const url = `${API_URL}/api/sync-players`;
+    const url = `${API_URL}/sync/players`;
 
     console.log(`\n[${i + 1}-${Math.min(i + BATCH_SIZE, players.length)}/${players.length}] 전송 중...`);
 
