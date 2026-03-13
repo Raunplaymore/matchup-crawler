@@ -8,6 +8,8 @@
  * ASP.NET postback으로 페이지네이션 처리, 선수별 상세 페이지에서 등번호/포지션/투타 정보 수집.
  */
 import * as cheerio from "cheerio";
+import { robustFetch, robustFetchWithCookies } from "./lib/http";
+import { sendTelegram } from "./lib/telegram";
 
 const BASE = "https://www.koreabaseball.com";
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
@@ -66,14 +68,12 @@ function buildPostback(html: string, eventTarget: string): URLSearchParams {
   const $ = cheerio.load(html);
   const body = new URLSearchParams();
 
-  // hidden field 수집
   $("input[type=hidden]").each((_, el) => {
     const name = $(el).attr("name");
     const val = $(el).val() as string;
     if (name) body.set(name, val || "");
   });
 
-  // __EVENTTARGET 덮어쓰기 (핵심!)
   body.set("__EVENTTARGET", eventTarget);
   body.set("__EVENTARGUMENT", "");
 
@@ -83,13 +83,20 @@ function buildPostback(html: string, eventTarget: string): URLSearchParams {
 // 한 카테고리(타자/투수) 전체 페이지 수집
 async function crawlCategory(url: string): Promise<{ id: string; name: string; team: string }[]> {
   console.log(`  Fetching: ${url}`);
-  const res = await fetch(url, { headers: { "User-Agent": UA } });
-  const html = await res.text();
-  const cookies = res.headers.getSetCookie?.().join("; ") || "";
+  const { text: html, cookies } = await robustFetchWithCookies(url, {
+    timeoutMs: 30000,
+    retries: 3,
+    minResponseSize: 500,
+  });
 
   let all = parseTable(html);
   const pages = getPageCount(html);
   console.log(`  Page 1: ${all.length} players, total pages: ${pages}`);
+
+  if (all.length === 0) {
+    console.warn("  ⚠️ 첫 페이지에서 선수를 찾지 못했습니다. HTML 구조 변경 가능성.");
+    return all;
+  }
 
   let currentHtml = html;
   for (let p = 2; p <= pages; p++) {
@@ -97,20 +104,33 @@ async function crawlCategory(url: string): Promise<{ id: string; name: string; t
     const body = buildPostback(currentHtml, target);
 
     await new Promise((r) => setTimeout(r, 500));
-    const res2 = await fetch(url, {
-      method: "POST",
-      headers: {
-        "User-Agent": UA,
-        "Content-Type": "application/x-www-form-urlencoded",
-        Cookie: cookies,
-        Referer: url,
-      },
-      body: body.toString(),
-    });
-    currentHtml = await res2.text();
-    const pagePlayers = parseTable(currentHtml);
-    console.log(`  Page ${p}: ${pagePlayers.length} players`);
-    all = all.concat(pagePlayers);
+
+    try {
+      const res2 = await robustFetch(url, {
+        method: "POST",
+        headers: {
+          "User-Agent": UA,
+          "Content-Type": "application/x-www-form-urlencoded",
+          Cookie: cookies,
+          Referer: url,
+        },
+        body: body.toString(),
+        timeoutMs: 30000,
+        retries: 2,
+      });
+
+      if (!res2.ok) {
+        console.warn(`  ⚠️ Page ${p} 요청 실패 (${res2.status}), 건너뜀`);
+        continue;
+      }
+
+      currentHtml = await res2.text();
+      const pagePlayers = parseTable(currentHtml);
+      console.log(`  Page ${p}: ${pagePlayers.length} players`);
+      all = all.concat(pagePlayers);
+    } catch (e) {
+      console.warn(`  ⚠️ Page ${p} 실패, 건너뜀: ${e}`);
+    }
   }
 
   return all;
@@ -123,11 +143,10 @@ async function fetchDetail(playerId: string, isPitcher: boolean) {
     : `${BASE}/Record/Player/HitterDetail/Basic.aspx?playerId=${playerId}`;
 
   try {
-    const res = await fetch(url, { headers: { "User-Agent": UA } });
+    const res = await robustFetch(url, { timeoutMs: 15000, retries: 2, retryDelayMs: 1000 });
     const html = await res.text();
     const $ = cheerio.load(html);
 
-    // 프로필 영역 텍스트
     const text = $(".player_info").text() + " " + $(".con").text().substring(0, 2000);
 
     // 등번호
@@ -163,7 +182,8 @@ async function fetchDetail(playerId: string, isPitcher: boolean) {
     }
 
     return { detailPosition, backNumber, bats, throws: throws_ };
-  } catch {
+  } catch (e) {
+    console.warn(`  상세 페이지 실패 (${playerId}): ${e}`);
     return { detailPosition: null, backNumber: null, bats: null, throws: null };
   }
 }
@@ -192,6 +212,18 @@ export async function crawlAllPlayers(): Promise<CrawledPlayer[]> {
   for (const p of hitters) if (!unique.has(p.id)) unique.set(p.id, { ...p, isPitcher: false });
 
   console.log(`\n총 고유 선수: ${unique.size}명`);
+
+  if (unique.size === 0) {
+    console.error("❌ 선수를 찾지 못했습니다. KBO 사이트 상태를 확인하세요.");
+    await sendTelegram(`🚨 <b>[crawl-players] 크리티컬</b>\n선수를 한 명도 찾지 못했습니다. KBO 사이트 상태 확인 필요.`);
+    return [];
+  }
+
+  if (unique.size < 100) {
+    console.warn(`⚠️ 선수가 ${unique.size}명으로 비정상적으로 적습니다.`);
+    await sendTelegram(`⚠️ <b>[crawl-players] 경고</b>\n선수 ${unique.size}명 — 비정상적으로 적음. 크롤링 오류 가능성.`);
+  }
+
   console.log("상세 정보 수집 중...\n");
 
   const entries = Array.from(unique.entries());
@@ -227,5 +259,9 @@ export async function crawlAllPlayers(): Promise<CrawledPlayer[]> {
 if (require.main === module) {
   crawlAllPlayers()
     .then((players) => console.log(JSON.stringify(players, null, 2)))
-    .catch((e) => { console.error("크롤링 실패:", e); process.exit(1); });
+    .catch(async (e) => {
+      console.error("크롤링 실패:", e);
+      await sendTelegram(`🚨 <b>[crawl-players] 실패</b>\n${String(e).substring(0, 200)}`);
+      process.exit(1);
+    });
 }

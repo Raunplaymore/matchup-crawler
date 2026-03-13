@@ -11,6 +11,7 @@
  *   npx tsx scripts/sync-register.ts 20260401 https://...     # 날짜 + 프로덕션
  */
 import { crawlRegisterAll } from "./crawl-register";
+import { sendTelegram } from "./lib/telegram";
 import "dotenv/config";
 
 const args = process.argv.slice(2);
@@ -38,6 +39,7 @@ async function main() {
   // 크롤링 실패 감지: 시즌 중 최소 100명 이상 예상
   if (players.length < 50) {
     console.warn(`⚠️ 등록 선수가 ${players.length}명으로 비정상적으로 적습니다. 크롤링 오류 가능성.`);
+    await sendTelegram(`⚠️ <b>[sync-register] 경고</b>\n등록 선수 ${players.length}명 — 비정상적으로 적음.`);
   }
 
   console.log(`\n${API_URL}/sync/register 로 전송 중...`);
@@ -55,6 +57,7 @@ async function main() {
   let data;
   try { data = JSON.parse(text); } catch {
     console.error(`Non-JSON response (${res.status}): ${text.substring(0, 300)}`);
+    await sendTelegram(`🚨 <b>[sync-register] 실패</b>\nAPI Non-JSON 응답 (${res.status})`);
     process.exit(1);
   }
 
@@ -68,11 +71,13 @@ async function main() {
     }
   } else {
     console.error("\n싱크 실패:", res.status, data);
+    await sendTelegram(`🚨 <b>[sync-register] 싱크 실패</b>\nHTTP ${res.status}: ${JSON.stringify(data).substring(0, 200)}`);
     process.exit(1);
   }
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error(e);
+  await sendTelegram(`🚨 <b>[sync-register] 실패</b>\n${String(e).substring(0, 200)}`);
   process.exit(1);
 });

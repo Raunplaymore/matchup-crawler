@@ -13,9 +13,10 @@
  */
 import * as cheerio from "cheerio";
 import { readFileSync, writeFileSync, existsSync } from "fs";
+import { robustFetch, robustFetchWithCookies } from "./lib/http";
+import { sendTelegram } from "./lib/telegram";
 
 const BASE = "https://www.koreabaseball.com";
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
 
 const TEAM_MAP: Record<string, string> = {
   LG: "LG", 한화: "한화", SSG: "SSG", 삼성: "삼성",
@@ -110,7 +111,7 @@ async function fetchDetail(playerId: string) {
   // 수비 기록의 선수는 대부분 타자 → HitterDetail 먼저 시도
   const url = `${BASE}/Record/Player/HitterDetail/Basic.aspx?playerId=${playerId}`;
   try {
-    const res = await fetch(url, { headers: { "User-Agent": UA } });
+    const res = await robustFetch(url, { timeoutMs: 15000, retries: 2, retryDelayMs: 1000 });
     const html = await res.text();
     const $ = cheerio.load(html);
 
@@ -150,15 +151,16 @@ async function postWithRetry(
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       await new Promise((r) => setTimeout(r, 800 + (attempt - 1) * 1500));
-      const res = await fetch(url, {
+      const res = await robustFetch(url, {
         method: "POST",
         headers: {
-          "User-Agent": UA,
           "Content-Type": "application/x-www-form-urlencoded",
           Cookie: cookies,
           Referer: url,
         },
         body: body.toString(),
+        timeoutMs: 15000,
+        retries: 1, // outer loop handles retries
       });
       const html = await res.text();
       if (html.includes("tData01")) return html;
@@ -174,9 +176,9 @@ async function postWithRetry(
 // 새 세션으로 특정 그룹까지 빠르게 이동 (btnNext N번)
 async function startFreshSession(url: string, groupIndex: number): Promise<{ html: string; cookies: string } | null> {
   try {
-    const res = await fetch(url, { headers: { "User-Agent": UA } });
-    let html = await res.text();
-    const cookies = res.headers.getSetCookie?.().join("; ") || "";
+    const session = await robustFetchWithCookies(url, { timeoutMs: 15000, retries: 3, minResponseSize: 500 });
+    let html = session.text;
+    const cookies = session.cookies;
 
     // groupIndex=0 → page 1 (group 1-5), groupIndex=1 → pages 6-10, etc.
     for (let g = 0; g < groupIndex; g++) {
@@ -353,9 +355,9 @@ export async function crawlDefense(): Promise<CrawledPlayer[]> {
   console.log("\n[투수 기록 보완]");
   const pitcherUrl = `${BASE}/Record/Player/PitcherBasic/Basic1.aspx`;
   try {
-    const pRes = await fetch(pitcherUrl, { headers: { "User-Agent": UA } });
-    const pHtml = await pRes.text();
-    const pCookies = pRes.headers.getSetCookie?.().join("; ") || "";
+    const pSession = await robustFetchWithCookies(pitcherUrl, { timeoutMs: 15000, retries: 3 });
+    const pHtml = pSession.text;
+    const pCookies = pSession.cookies;
 
     const $ = cheerio.load(pHtml);
     let pitchers: { id: string; name: string; team: string }[] = [];
@@ -383,15 +385,16 @@ export async function crawlDefense(): Promise<CrawledPlayer[]> {
         const target = `ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ucPager$btnNo${btnIdx}`;
         const body = buildPostback(pCurrentHtml, target);
         await new Promise((r) => setTimeout(r, 500));
-        const res2 = await fetch(pitcherUrl, {
+        const res2 = await robustFetch(pitcherUrl, {
           method: "POST",
           headers: {
-            "User-Agent": UA,
             "Content-Type": "application/x-www-form-urlencoded",
             Cookie: pCookies,
             Referer: pitcherUrl,
           },
           body: body.toString(),
+          timeoutMs: 15000,
+          retries: 2,
         });
         pCurrentHtml = await res2.text();
         const $p = cheerio.load(pCurrentHtml);
@@ -413,15 +416,16 @@ export async function crawlDefense(): Promise<CrawledPlayer[]> {
         const target = `ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ucPager$btnNext`;
         const body = buildPostback(pCurrentHtml, target);
         await new Promise((r) => setTimeout(r, 500));
-        const res3 = await fetch(pitcherUrl, {
+        const res3 = await robustFetch(pitcherUrl, {
           method: "POST",
           headers: {
-            "User-Agent": UA,
             "Content-Type": "application/x-www-form-urlencoded",
             Cookie: pCookies,
             Referer: pitcherUrl,
           },
           body: body.toString(),
+          timeoutMs: 15000,
+          retries: 2,
         });
         pCurrentHtml = await res3.text();
         const $p = cheerio.load(pCurrentHtml);
@@ -456,6 +460,17 @@ export async function crawlDefense(): Promise<CrawledPlayer[]> {
   }
 
   console.log(`\n최종 고유 선수: ${unique.size}명`);
+
+  if (unique.size === 0) {
+    console.error("선수를 한 명도 찾지 못했습니다. 크롤링 중단.");
+    await sendTelegram(`🚨 <b>[crawl-defense] 크리티컬</b>\n선수 0명. KBO 사이트 점검 필요.`);
+    return [];
+  }
+  if (unique.size < 100) {
+    console.warn(`⚠️ 선수가 ${unique.size}명으로 비정상적으로 적습니다.`);
+    await sendTelegram(`⚠️ <b>[crawl-defense] 경고</b>\n선수 ${unique.size}명 — 비정상적으로 적음.`);
+  }
+
   console.log("상세 정보 수집 중...\n");
 
   // 상세 페이지에서 등번호, 투타 수집
@@ -497,5 +512,9 @@ if (require.main === module) {
       writeFileSync(outPath, JSON.stringify(players, null, 2));
       console.log(`\n결과 저장: ${outPath} (${players.length}명)`);
     })
-    .catch((e) => { console.error("크롤링 실패:", e); process.exit(1); });
+    .catch(async (e) => {
+      console.error("크롤링 실패:", e);
+      await sendTelegram(`🚨 <b>[crawl-defense] 실패</b>\n${String(e).substring(0, 200)}`);
+      process.exit(1);
+    });
 }

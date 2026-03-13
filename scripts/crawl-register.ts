@@ -11,9 +11,10 @@
  * - 각 td 안에 <ul><li>이름(등번호)</li></ul>
  */
 import * as cheerio from "cheerio";
+import { robustFetch, robustFetchWithCookies, robustFetchText } from "./lib/http";
+import { sendTelegram } from "./lib/telegram";
 
 const BASE = "https://www.koreabaseball.com";
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
 const REGISTER_URL = `${BASE}/Player/RegisterAll.aspx`;
 
 // KBO 표시 팀명 → 우리 팀 ID 매핑
@@ -82,9 +83,7 @@ export async function crawlRegisterAll(date?: string): Promise<{
   // 날짜 지정 시 postback
   if (date) {
     // 초기 페이지 로드
-    const initRes = await fetch(REGISTER_URL, { headers: { "User-Agent": UA } });
-    const initHtml = await initRes.text();
-    const cookies = initRes.headers.getSetCookie?.().join("; ") || "";
+    const { text: initHtml, cookies } = await robustFetchWithCookies(REGISTER_URL, { timeoutMs: 15000, retries: 3 });
 
     const $init = cheerio.load(initHtml);
     const fields: Record<string, string> = {};
@@ -99,31 +98,43 @@ export async function crawlRegisterAll(date?: string): Promise<{
     body.set("ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$hfSearchDate", date);
     body.set("ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$btnSearch", "");
 
-    const res = await fetch(REGISTER_URL, {
+    const res = await robustFetch(REGISTER_URL, {
       method: "POST",
       headers: {
-        "User-Agent": UA,
         "Content-Type": "application/x-www-form-urlencoded",
         Cookie: cookies,
         Referer: REGISTER_URL,
       },
       body: body.toString(),
+      timeoutMs: 15000,
+      retries: 3,
     });
 
     const html = await res.text();
     const $page = cheerio.load(html);
     const pageDate = ($page("#cphContents_cphContents_cphContents_hfSearchDate").val() as string) || date;
+    const players = parseRegisterPage(html);
 
-    return { date: pageDate, players: parseRegisterPage(html) };
+    if (players.length === 0) {
+      console.warn("⚠️ 파싱 결과 0명 — HTML 구조 변경 가능성 확인 필요");
+      await sendTelegram(`🚨 <b>[crawl-register] 크리티컬</b>\n날짜 ${date} 파싱 결과 0명. HTML 구조 변경 가능성.`);
+    }
+
+    return { date: pageDate, players };
   }
 
   // 날짜 미지정: 기본 (최신 날짜)
-  const res = await fetch(url, { headers: { "User-Agent": UA } });
-  const html = await res.text();
+  const html = await robustFetchText(url, { timeoutMs: 15000, retries: 3, minResponseSize: 500 });
   const $ = cheerio.load(html);
   const pageDate = ($("#cphContents_cphContents_cphContents_hfSearchDate").val() as string) || "unknown";
+  const players = parseRegisterPage(html);
 
-  return { date: pageDate, players: parseRegisterPage(html) };
+  if (players.length === 0) {
+    console.warn("⚠️ 파싱 결과 0명 — HTML 구조 변경 가능성 확인 필요");
+    await sendTelegram(`🚨 <b>[crawl-register] 크리티컬</b>\n파싱 결과 0명. HTML 구조 변경 가능성.`);
+  }
+
+  return { date: pageDate, players };
 }
 
 if (typeof require !== "undefined" && require.main === module) {

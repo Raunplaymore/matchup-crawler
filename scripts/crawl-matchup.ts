@@ -20,11 +20,11 @@
  */
 import * as cheerio from "cheerio";
 import { readFileSync, writeFileSync, existsSync } from "fs";
+import { robustFetch, robustFetchWithCookies } from "./lib/http";
 
 // ─── 설정 ───
 const BASE = "https://www.koreabaseball.com";
 const URL = `${BASE}/Record/Etc/HitVsPit.aspx`;
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
 
 // 텔레그램 알림 (환경변수로만 설정)
 const TG_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
@@ -139,31 +139,6 @@ function buildPostBody(
     body.set(k, v);
   }
   return body;
-}
-
-// ─── HTTP 유틸 ───
-async function fetchWithRetry(
-  url: string,
-  options: RequestInit,
-  retries = 3,
-  delayMs = 2000
-): Promise<Response> {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const res = await fetch(url, options);
-      if (res.ok) return res;
-      if (attempt < retries) {
-        console.log(`    HTTP ${res.status}, 재시도 ${attempt}/${retries}...`);
-        await sleep(delayMs * attempt);
-      }
-    } catch (e) {
-      if (attempt < retries) {
-        console.log(`    네트워크 에러, 재시도 ${attempt}/${retries}: ${e}`);
-        await sleep(delayMs * attempt);
-      } else throw e;
-    }
-  }
-  throw new Error(`${retries}회 시도 후 실패`);
 }
 
 function sleep(ms: number) {
@@ -300,11 +275,11 @@ class KBOSession {
   // Step 1: 초기 페이지 로드
   async init(): Promise<boolean> {
     try {
-      const res = await fetchWithRetry(URL, {
-        headers: { "User-Agent": UA },
+      const { text: html, cookies } = await robustFetchWithCookies(URL, {
+        timeoutMs: 30000,
+        retries: 3,
       });
-      this.cookies = res.headers.getSetCookie?.().join("; ") || "";
-      const html = await res.text();
+      this.cookies = cookies;
       this.hiddenFields = extractHiddenFields(html);
       this.currentPitcherTeam = "";
       this.currentHitterTeam = "";
@@ -327,15 +302,16 @@ class KBOSession {
         [`${CTL}$ddlHitterTeam`]: this.currentHitterTeam || "",
       });
 
-      const res = await fetchWithRetry(URL, {
+      const res = await robustFetch(URL, {
         method: "POST",
         headers: {
-          "User-Agent": UA,
           "Content-Type": "application/x-www-form-urlencoded",
           Cookie: this.cookies,
           Referer: URL,
         },
         body: body.toString(),
+        timeoutMs: 30000,
+        retries: 3,
       });
 
       const html = await res.text();
@@ -360,15 +336,16 @@ class KBOSession {
         [`${CTL}$ddlHitterTeam`]: teamCode,
       });
 
-      const res = await fetchWithRetry(URL, {
+      const res = await robustFetch(URL, {
         method: "POST",
         headers: {
-          "User-Agent": UA,
           "Content-Type": "application/x-www-form-urlencoded",
           Cookie: this.cookies,
           Referer: URL,
         },
         body: body.toString(),
+        timeoutMs: 30000,
+        retries: 3,
       });
 
       const html = await res.text();
@@ -401,15 +378,16 @@ class KBOSession {
       );
       body.set("__ASYNCPOST", "true");
 
-      const res = await fetchWithRetry(URL, {
+      const res = await robustFetch(URL, {
         method: "POST",
         headers: {
-          "User-Agent": UA,
           "Content-Type": "application/x-www-form-urlencoded",
           Cookie: this.cookies,
           Referer: URL,
         },
         body: body.toString(),
+        timeoutMs: 30000,
+        retries: 3,
       });
 
       const html = await res.text();

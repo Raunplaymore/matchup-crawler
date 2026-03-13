@@ -18,12 +18,11 @@
  */
 import * as cheerio from "cheerio";
 import { readFileSync, writeFileSync, existsSync } from "fs";
+import { robustFetch, robustFetchWithCookies } from "./lib/http";
 
 // ─── 설정 ───
 const BASE = "https://www.koreabaseball.com";
 const MATCHUP_URL = `${BASE}/Record/Etc/HitVsPit.aspx`;
-const UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
 
 const TG_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
@@ -112,33 +111,6 @@ async function sendTelegram(text: string) {
   } catch {}
 }
 
-// ─── HTTP ───
-async function fetchWithRetry(
-  url: string,
-  options: RequestInit,
-  retries = 3,
-  delayMs = 2000
-): Promise<Response> {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const res = await fetch(url, options);
-      if (res.ok) return res;
-      if (attempt < retries) {
-        console.log(`    HTTP ${res.status}, 재시도 ${attempt}/${retries}...`);
-        await sleep(delayMs * attempt);
-      }
-    } catch (e) {
-      if (attempt < retries) {
-        console.log(
-          `    네트워크 에러, 재시도 ${attempt}/${retries}: ${e}`
-        );
-        await sleep(delayMs * attempt);
-      } else throw e;
-    }
-  }
-  throw new Error(`${retries}회 시도 후 실패`);
-}
-
 // ─── 경기 목록 조회 ───
 async function fetchGameList(dateStr: string): Promise<GameInfo[]> {
   const year = parseInt(dateStr.substring(0, 4));
@@ -148,16 +120,15 @@ async function fetchGameList(dateStr: string): Promise<GameInfo[]> {
 
   try {
     // ASMX JSON 호출: Content-Type must be application/json for JSON response
-    const res = await fetch(`${BASE}/ws/Main.asmx/GetKboGameList`, {
+    const res = await robustFetch(`${BASE}/ws/Main.asmx/GetKboGameList`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
-        "User-Agent": UA,
       },
       body: JSON.stringify({ leId: "1", srId, date: dateStr }),
+      timeoutMs: 15000,
+      retries: 2,
     });
-
-    if (!res.ok) throw new Error(`API ${res.status}`);
 
     const text = await res.text();
 
@@ -211,7 +182,7 @@ async function fetchGameListFromScoreboard(
   dateStr: string
 ): Promise<GameInfo[]> {
   const url = `${BASE}/Schedule/ScoreBoard.aspx`;
-  const res = await fetchWithRetry(url, { headers: { "User-Agent": UA } });
+  const res = await robustFetch(url, { timeoutMs: 15000, retries: 3 });
   const html = await res.text();
   const $ = cheerio.load(html);
 
@@ -318,11 +289,11 @@ class KBOSession {
 
   async init(): Promise<boolean> {
     try {
-      const res = await fetchWithRetry(MATCHUP_URL, {
-        headers: { "User-Agent": UA },
+      const { text: html, cookies } = await robustFetchWithCookies(MATCHUP_URL, {
+        timeoutMs: 30000,
+        retries: 3,
       });
-      this.cookies = res.headers.getSetCookie?.().join("; ") || "";
-      const html = await res.text();
+      this.cookies = cookies;
       this.hiddenFields = extractHiddenFields(html);
       this.currentPitcherTeam = "";
       this.currentHitterTeam = "";
@@ -342,15 +313,16 @@ class KBOSession {
         [`${CTL}$ddlPitcherTeam`]: teamCode,
         [`${CTL}$ddlHitterTeam`]: this.currentHitterTeam || "",
       });
-      const res = await fetchWithRetry(MATCHUP_URL, {
+      const res = await robustFetch(MATCHUP_URL, {
         method: "POST",
         headers: {
-          "User-Agent": UA,
           "Content-Type": "application/x-www-form-urlencoded",
           Cookie: this.cookies,
           Referer: MATCHUP_URL,
         },
         body: body.toString(),
+        timeoutMs: 30000,
+        retries: 3,
       });
       const html = await res.text();
       this.hiddenFields = extractHiddenFields(html);
@@ -371,15 +343,16 @@ class KBOSession {
         [`${CTL}$ddlPitcherTeam`]: this.currentPitcherTeam,
         [`${CTL}$ddlHitterTeam`]: teamCode,
       });
-      const res = await fetchWithRetry(MATCHUP_URL, {
+      const res = await robustFetch(MATCHUP_URL, {
         method: "POST",
         headers: {
-          "User-Agent": UA,
           "Content-Type": "application/x-www-form-urlencoded",
           Cookie: this.cookies,
           Referer: MATCHUP_URL,
         },
         body: body.toString(),
+        timeoutMs: 30000,
+        retries: 3,
       });
       const html = await res.text();
       this.hiddenFields = extractHiddenFields(html);
@@ -411,15 +384,16 @@ class KBOSession {
       );
       body.set("__ASYNCPOST", "true");
 
-      const res = await fetchWithRetry(MATCHUP_URL, {
+      const res = await robustFetch(MATCHUP_URL, {
         method: "POST",
         headers: {
-          "User-Agent": UA,
           "Content-Type": "application/x-www-form-urlencoded",
           Cookie: this.cookies,
           Referer: MATCHUP_URL,
         },
         body: body.toString(),
+        timeoutMs: 30000,
+        retries: 3,
       });
 
       const html = await res.text();

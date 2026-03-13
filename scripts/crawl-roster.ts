@@ -5,9 +5,10 @@
  * 기록 페이지와 달리 시즌 출장 여부와 무관하게 등록 선수 전원이 나옴.
  */
 import * as cheerio from "cheerio";
+import { robustFetch, robustFetchWithCookies } from "./lib/http";
+import { sendTelegram } from "./lib/telegram";
 
 const BASE = "https://www.koreabaseball.com";
-const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
 const SEARCH_URL = `${BASE}/Player/Search.aspx`;
 
 // KBO 사이트의 팀 코드 → 우리 팀 ID 매핑
@@ -150,16 +151,17 @@ function getPageCount(html: string): number {
 }
 
 async function postAsync(cookies: string, body: URLSearchParams): Promise<string> {
-  const res = await fetch(SEARCH_URL, {
+  const res = await robustFetch(SEARCH_URL, {
     method: "POST",
     headers: {
-      "User-Agent": UA,
       "Content-Type": "application/x-www-form-urlencoded",
       Cookie: cookies,
       Referer: SEARCH_URL,
       "X-MicrosoftAjax": "Delta=true",
     },
     body: body.toString(),
+    timeoutMs: 15000,
+    retries: 2,
   });
   return res.text();
 }
@@ -222,7 +224,7 @@ async function fetchPlayerDetail(playerId: string, isPitcher: boolean): Promise<
     : `${BASE}/Record/Player/HitterDetail/Basic.aspx?playerId=${playerId}`;
 
   try {
-    const res = await fetch(url, { headers: { "User-Agent": UA } });
+    const res = await robustFetch(url, { timeoutMs: 15000, retries: 2, retryDelayMs: 1000 });
     const html = await res.text();
     const $ = cheerio.load(html);
     const text = $(".player_info").text() + " " + $(".con").text().substring(0, 2000);
@@ -259,9 +261,11 @@ export async function crawlAllRosters(): Promise<RosterPlayer[]> {
 
   // 1. 초기 페이지 로드 (hidden fields + cookies)
   console.log("초기 페이지 로드...");
-  const initRes = await fetch(SEARCH_URL, { headers: { "User-Agent": UA } });
-  const initHtml = await initRes.text();
-  const cookies = initRes.headers.getSetCookie?.().join("; ") || "";
+  const { text: initHtml, cookies } = await robustFetchWithCookies(SEARCH_URL, {
+    timeoutMs: 15000,
+    retries: 3,
+    minResponseSize: 500,
+  });
   let fields = extractHiddenFields(initHtml);
 
   const allPlayers: RosterPlayer[] = [];
@@ -279,6 +283,16 @@ export async function crawlAllRosters(): Promise<RosterPlayer[]> {
   }
 
   console.log(`\n총 선수: ${allPlayers.length}명`);
+
+  if (allPlayers.length === 0) {
+    console.error("선수를 한 명도 가져오지 못했습니다. 크롤링 중단.");
+    await sendTelegram(`🚨 <b>[crawl-roster] 크리티컬</b>\n선수 0명. KBO 사이트 점검 필요.`);
+    return allPlayers;
+  }
+  if (allPlayers.length < 100) {
+    console.warn(`⚠️ 선수 수가 비정상적으로 적습니다 (${allPlayers.length}명). 사이트 점검 또는 파싱 오류 가능성 확인 필요.`);
+    await sendTelegram(`⚠️ <b>[crawl-roster] 경고</b>\n선수 ${allPlayers.length}명 — 비정상적으로 적음.`);
+  }
 
   // 3. 상세 정보가 부족한 선수들의 세부 포지션/등번호 보강
   console.log("\n상세 정보 보강 중...");
@@ -317,5 +331,9 @@ if (typeof require !== "undefined" && require.main === module) {
         console.log(`  ${team}: ${count}명`);
       }
     })
-    .catch((e) => { console.error("크롤링 실패:", e); process.exit(1); });
+    .catch(async (e) => {
+      console.error("크롤링 실패:", e);
+      await sendTelegram(`🚨 <b>[crawl-roster] 실패</b>\n${String(e).substring(0, 200)}`);
+      process.exit(1);
+    });
 }
