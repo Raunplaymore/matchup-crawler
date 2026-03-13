@@ -12,6 +12,7 @@
     "crawl:roster": "tsx scripts/crawl-roster.ts",
     "crawl:defense": "tsx scripts/crawl-defense.ts",
     "crawl:register": "tsx scripts/crawl-register.ts",
+    "crawl:entry": "tsx scripts/crawl-entry.ts",
     "sync": "tsx scripts/sync.ts",
     "sync:register": "tsx scripts/sync-register.ts",
     "resolve:namu": "tsx scripts/resolve-namuwiki.ts",

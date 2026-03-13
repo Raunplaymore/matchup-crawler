@@ -1,0 +1,52 @@
+name: KBO 선수 등록 현황 싱크
+
+on:
+  schedule:
+    # 매주 월요일 UTC 00:00 (KST 09:00)
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      team:
+        description: '특정 팀만 (비워두면 전체)'
+        default: ''
+
+jobs:
+  sync-entry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Crawl & Sync
+        env:
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+        run: |
+          API_URL="https://api.lineup.prmtwiki.com"
+          TEAM="${{ github.event.inputs.team }}"
+          npx tsx scripts/sync.ts --entry "$API_URL"
+
+      - name: Notify
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          STATUS="${{ job.status }}"
+          EMOJI=$([[ "$STATUS" == "success" ]] && echo "✅" || echo "❌")
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d parse_mode="HTML" \
+              -d text="${EMOJI} <b>선수 등록 현황 싱크 ${STATUS}</b>" || true
+          fi

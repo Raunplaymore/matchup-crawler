@@ -11,11 +11,13 @@
 import { crawlAllPlayers } from "./crawl-players";
 import { crawlAllRosters } from "./crawl-roster";
 import { crawlDefense } from "./crawl-defense";
+import { crawlEntry } from "./crawl-entry";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import "dotenv/config";
 
 const USE_ROSTER = process.argv.includes("--roster");
 const USE_DEFENSE = process.argv.includes("--defense");
+const USE_ENTRY = process.argv.includes("--entry");
 const API_URL = process.argv.filter(a => !a.startsWith("--") && a !== process.argv[0] && a !== process.argv[1])[0] || "http://localhost:3000";
 const SYNC_SECRET = process.env.SYNC_SECRET;
 
@@ -35,7 +37,10 @@ async function main() {
     console.log(`캐시 파일 사용: ${CACHE_FILE}`);
     players = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
   } else {
-    players = USE_DEFENSE ? await crawlDefense() : USE_ROSTER ? await crawlAllRosters() : await crawlAllPlayers();
+    players = USE_ENTRY ? (await crawlEntry()).players
+      : USE_DEFENSE ? await crawlDefense()
+      : USE_ROSTER ? await crawlAllRosters()
+      : await crawlAllPlayers();
     writeFileSync(CACHE_FILE, JSON.stringify(players, null, 2));
     console.log(`크롤링 결과 저장: ${CACHE_FILE} (${players.length}명)`);
   }
