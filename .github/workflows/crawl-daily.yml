@@ -40,14 +40,20 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: npx tsx scripts/crawl-players.ts --output scripts/crawled-players.json
-
-      - name: Verify player list
         run: |
-          COUNT=$(node -e "const d=require('./scripts/crawled-players.json'); console.log(d.length)")
-          echo "선수 ${COUNT}명 크롤링 완료"
-          if [ "$COUNT" -lt 50 ]; then
-            echo "::error::선수 수가 비정상적으로 적음 (${COUNT}명)"
+          # 시범경기 기간에는 시즌 기록 페이지가 비어있을 수 있음
+          # 크롤링 실패 시 기존 커밋된 파일 사용
+          npx tsx scripts/crawl-players.ts --output scripts/crawled-players-new.json || true
+          NEW_COUNT=$(node -e "try{const d=require('./scripts/crawled-players-new.json');console.log(d.length)}catch{console.log(0)}")
+          OLD_COUNT=$(node -e "try{const d=require('./scripts/crawled-players.json');console.log(d.length)}catch{console.log(0)}")
+          echo "크롤링: ${NEW_COUNT}명, 기존: ${OLD_COUNT}명"
+          if [ "$NEW_COUNT" -gt 50 ]; then
+            mv scripts/crawled-players-new.json scripts/crawled-players.json
+            echo "최신 선수 목록 사용 (${NEW_COUNT}명)"
+          elif [ "$OLD_COUNT" -gt 50 ]; then
+            echo "시즌 기록 미공개 — 기존 선수 목록 사용 (${OLD_COUNT}명)"
+          else
+            echo "::error::선수 목록 없음 (크롤링 ${NEW_COUNT}명, 기존 ${OLD_COUNT}명)"
             exit 1
           fi
 
