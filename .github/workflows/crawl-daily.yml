@@ -36,7 +36,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Crawl daily matchups
+      - name: Crawl daily matchups (with retry)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -45,7 +45,21 @@ jobs:
           DELAY="${{ github.event.inputs.delay || '3000' }}"
           FLAGS="--delay $DELAY"
           if [ -n "$DATE" ]; then FLAGS="$FLAGS --date $DATE"; fi
-          npx tsx scripts/crawl-daily.ts $FLAGS
+
+          # 최대 2회 시도, 실패 시 2분 대기 후 재시도
+          for ATTEMPT in 1 2; do
+            echo "=== 시도 $ATTEMPT/2 ==="
+            if npx tsx scripts/crawl-daily.ts $FLAGS; then
+              echo "크롤링 성공 (시도 $ATTEMPT)"
+              exit 0
+            fi
+            if [ "$ATTEMPT" -lt 2 ]; then
+              echo "실패 — 120초 대기 후 재시도..."
+              sleep 120
+            fi
+          done
+          echo "2회 시도 모두 실패"
+          exit 1
 
       - name: Find daily result file
         id: find-result
@@ -196,3 +210,45 @@ jobs:
               -d parse_mode="HTML" \
               -d text="${EMOJI} <b>[Production] 일일 맞대결 ${STATUS}</b> (${RECORDS}건)" || true
           fi
+
+  # ── Stage 4: 백필 (최근 3일 실패 자동 재시도) ──
+  backfill:
+    needs: upload-production
+    if: always() && github.event.inputs.date == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check recent failures and dispatch backfill
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "=== 최근 3일 백필 체크 ==="
+
+          # 오늘 포함 최근 3일 날짜 생성
+          for DAYS_AGO in 1 2 3; do
+            TARGET_DATE=$(date -u -d "-${DAYS_AGO} days" +%Y%m%d 2>/dev/null || date -u -v-${DAYS_AGO}d +%Y%m%d)
+            echo "확인: ${TARGET_DATE}"
+
+            # 해당 날짜로 성공한 run이 있는지 확인
+            FOUND=$(gh run list \
+              --workflow="crawl-daily.yml" \
+              --json status,conclusion,createdAt,event \
+              --limit 30 \
+              -R "${{ github.repository }}" \
+              | jq -r --arg date "$TARGET_DATE" '
+                [.[] | select(
+                  (.createdAt | split("T")[0] | gsub("-";"")) == $date
+                  and .conclusion == "success"
+                )] | length
+              ')
+
+            if [ "$FOUND" = "0" ]; then
+              echo "  ${TARGET_DATE}: 성공 기록 없음 → 백필 dispatch"
+              gh workflow run crawl-daily.yml \
+                -f date="$TARGET_DATE" \
+                -R "${{ github.repository }}" || echo "  dispatch 실패 (무시)"
+            else
+              echo "  ${TARGET_DATE}: 성공 확인 (${FOUND}건) → 스킵"
+            fi
+          done
