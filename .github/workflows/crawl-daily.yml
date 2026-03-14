@@ -36,6 +36,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Crawl player list (선수 목록 최신화)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: npx tsx scripts/crawl-players.ts > scripts/crawled-players.json
+
+      - name: Verify player list
+        run: |
+          COUNT=$(node -e "const d=require('./scripts/crawled-players.json'); console.log(d.length)")
+          echo "선수 ${COUNT}명 크롤링 완료"
+          if [ "$COUNT" -lt 50 ]; then
+            echo "::error::선수 수가 비정상적으로 적음 (${COUNT}명)"
+            exit 1
+          fi
+
       - name: Crawl daily matchups (with retry)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
