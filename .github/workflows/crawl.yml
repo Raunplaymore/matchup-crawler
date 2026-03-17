@@ -8,7 +8,35 @@ on:
         default: '2000'
 
 jobs:
+  collect-players:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Collect players from matchup dropdown
+        run: npx tsx scripts/crawl-matchup.ts --collect-players scripts/matchup-players.json
+
+      - name: Upload player list
+        uses: actions/upload-artifact@v4
+        with:
+          name: matchup-players
+          path: scripts/matchup-players.json
+          retention-days: 1
+
   crawl:
+    needs: collect-players
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
@@ -62,6 +90,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Download player list
+        uses: actions/download-artifact@v4
+        with:
+          name: matchup-players
+          path: scripts/
+
       - name: Restore crawl cache
         uses: actions/cache/restore@v4
         with:
@@ -88,7 +122,7 @@ jobs:
         run: |
           DELAY="${{ github.event.inputs.delay || '2000' }}"
           HITTER_TEAMS="${{ matrix.hitter-teams }}"
-          CMD="npx tsx scripts/crawl-matchup.ts --full --pitcher-team ${{ matrix.team }} --delay $DELAY --limit 15000"
+          CMD="npx tsx scripts/crawl-matchup.ts --full --pitcher-team ${{ matrix.team }} --players-file scripts/matchup-players.json --delay $DELAY --limit 15000"
           if [ -n "$HITTER_TEAMS" ]; then
             CMD="$CMD --hitter-teams $HITTER_TEAMS"
           fi

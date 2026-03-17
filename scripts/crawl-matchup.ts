@@ -612,7 +612,10 @@ const SESSION_REFRESH = parseInt(getCliOption("--refresh", "40"));
 
 // ─── 전체/팀 크롤링 ───
 async function runFull() {
-  const { pitchers: allPitchers, hitters } = await loadPlayersFromMatchupPage(PITCHER_TEAM_FILTER || undefined);
+  const playersFile = getCliOption("--players-file", "");
+  const { pitchers: allPitchers, hitters } = playersFile
+    ? loadPlayersFromFile(playersFile, PITCHER_TEAM_FILTER || undefined)
+    : await loadPlayersFromMatchupPage(PITCHER_TEAM_FILTER || undefined);
   const cache = loadCache();
   const completedSet = new Set(cache.completed);
 
@@ -906,9 +909,30 @@ function runMerge() {
   printVerificationReport(merged.results);
 }
 
+// ─── 사전 수집된 선수 파일 로드 ───
+function loadPlayersFromFile(filePath: string, pitcherTeamFilter?: string): { pitchers: PlayerInfo[]; hitters: PlayerInfo[] } {
+  const data = JSON.parse(readFileSync(filePath, "utf-8"));
+  let pitchers: PlayerInfo[] = data.pitchers;
+  let hitters: PlayerInfo[] = data.hitters;
+
+  if (pitcherTeamFilter) {
+    pitchers = pitchers.filter(p => p.teamCode === pitcherTeamFilter);
+    hitters = hitters.filter(h => h.teamCode !== pitcherTeamFilter);
+  }
+
+  console.log(`선수 파일 로드: ${filePath} (투수 ${pitchers.length}명, 타자 ${hitters.length}명)\n`);
+  return { pitchers, hitters };
+}
+
 // ─── 엔트리포인트 ───
 async function main() {
-  if (process.argv.includes("--sample")) {
+  if (process.argv.includes("--collect-players")) {
+    // 맞대결 드롭다운에서 선수 목록만 수집하여 파일로 저장
+    const outPath = getCliOption("--collect-players", "scripts/matchup-players.json");
+    const { pitchers, hitters } = await loadPlayersFromMatchupPage();
+    writeFileSync(outPath, JSON.stringify({ pitchers, hitters }, null, 2));
+    console.log(`→ ${outPath} 저장 완료`);
+  } else if (process.argv.includes("--sample")) {
     await runSample();
   } else if (process.argv.includes("--merge")) {
     runMerge();
@@ -916,14 +940,16 @@ async function main() {
     await runFull();
   } else {
     console.log("사용법:");
-    console.log("  npx tsx scripts/crawl-matchup.ts --sample                    # 샘플 (3x3)");
-    console.log("  npx tsx scripts/crawl-matchup.ts --full                      # 전체");
-    console.log("  npx tsx scripts/crawl-matchup.ts --full --pitcher-team LT    # 특정 투수팀만");
-    console.log("  npx tsx scripts/crawl-matchup.ts --resume                    # 이어서 (캐시 기반)");
-    console.log("  npx tsx scripts/crawl-matchup.ts --full --limit 3000         # 커스텀 일일 제한");
-    console.log("  npx tsx scripts/crawl-matchup.ts --full --delay 2000         # 요청 간격 (ms)");
-    console.log("  npx tsx scripts/crawl-matchup.ts --full --fresh              # 캐시 초기화 + 전체");
-    console.log("  npx tsx scripts/crawl-matchup.ts --merge                     # 팀별 캐시 병합");
+    console.log("  npx tsx scripts/crawl-matchup.ts --collect-players [path]     # 선수 목록 수집만");
+    console.log("  npx tsx scripts/crawl-matchup.ts --sample                     # 샘플 (3x3)");
+    console.log("  npx tsx scripts/crawl-matchup.ts --full                       # 전체");
+    console.log("  npx tsx scripts/crawl-matchup.ts --full --pitcher-team LT     # 특정 투수팀만");
+    console.log("  npx tsx scripts/crawl-matchup.ts --full --players-file <path> # 사전 수집 파일 사용");
+    console.log("  npx tsx scripts/crawl-matchup.ts --resume                     # 이어서 (캐시 기반)");
+    console.log("  npx tsx scripts/crawl-matchup.ts --full --limit 3000          # 커스텀 일일 제한");
+    console.log("  npx tsx scripts/crawl-matchup.ts --full --delay 2000          # 요청 간격 (ms)");
+    console.log("  npx tsx scripts/crawl-matchup.ts --full --fresh               # 캐시 초기화 + 전체");
+    console.log("  npx tsx scripts/crawl-matchup.ts --merge                      # 팀별 캐시 병합");
     console.log("\n팀 코드: LG, HH(한화), SK(SSG), SS(삼성), NC, KT, LT(롯데), HT(KIA), OB(두산), WO(키움)");
   }
 }
