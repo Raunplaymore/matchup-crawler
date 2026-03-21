@@ -1,9 +1,9 @@
 name: 일일 맞대결 업데이트
 
 on:
-  schedule:
-    # 매일 UTC 14:00 (KST 23:00) — 경기 종료 후
-    - cron: '0 14 * * *'
+  # schedule:
+  #   # 매일 UTC 14:00 (KST 23:00) — 경기 종료 후
+  #   - cron: '0 14 * * *'
   workflow_dispatch:
     inputs:
       date:
